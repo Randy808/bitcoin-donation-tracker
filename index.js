@@ -5,6 +5,21 @@ const app = express();
 const http = require("http");
 const bitcoinjs = require("bitcoinjs-lib");
 const { createRpcClient } = require("./rpc_client");
+const winston = require("winston");
+
+let logger = winston.createLogger();
+
+if (process.env.NODE_ENV === "development") {
+  logger = winston.createLogger({
+    level: "debug",
+  });
+
+  logger.add(
+    new winston.transports.Console({
+      format: winston.format.simple(),
+    })
+  );
+}
 
 const { ZEROMQ_PORT, WALLET_NAME, PORT, NETWORK } = process.env;
 let donationAddress = undefined;
@@ -29,15 +44,15 @@ app.get("/address", (req, res) => {
 
 server = http.Server(app);
 
-async function run(ws) {
+async function run(websockets) {
   const sock = new zmq.Subscriber();
 
   sock.connect(`tcp://127.0.0.1:${ZEROMQ_PORT}`);
   sock.subscribe("rawtx");
-  console.log(`Subscriber connected to port ${ZEROMQ_PORT}`);
+  logger.debug(`Subscriber connected to port ${ZEROMQ_PORT}`);
 
   for await (const [topic, msg] of sock) {
-    console.log(
+    logger.debug(
       "received a message related to:",
       topic.toString(),
       "containing message:",
@@ -53,46 +68,49 @@ async function run(ws) {
           bitcoinjs.networks.regtest
         );
         if (address == donationAddress) {
-          await refreshBalance(ws);
+          await refreshBalance(websockets);
         }
       } catch (e) {
-        console.log(e.message);
+        logger.debug(e.message);
       }
     }
   }
 }
 
-async function refreshBalance(ws) {
+async function refreshBalance(websockets) {
   try {
     await client.request("loadwallet", { filename: WALLET_NAME });
   } catch (e) {
     if (!e.message.includes("is already loaded.")) {
-      console.log(e.message);
+      logger.debug(e.message);
     }
   }
 
   let confirmed = await client.request("getbalance");
   let unconfirmed = await client.request("getunconfirmedbalance");
 
-  ws.send(
-    JSON.stringify({
-      confirmed,
-      unconfirmed,
-    })
-  );
+  for (let i = 0; i < websockets.length; i++) {
+    websockets[i].send(
+      JSON.stringify({
+        confirmed,
+        unconfirmed,
+      })
+    );
+  }
 }
 
 const wss = new WebSocketServer({ server });
+let websocketConnections = [];
 
 wss.on("connection", function connection(ws) {
-  ws.on("error", console.error);
+  ws.on("error", logger.error);
 
   ws.on("message", function message(data) {
-    console.log("received: %s", data);
+    logger.debug("received: %s", data);
   });
 
-  refreshBalance(ws);
-  run(ws);
+  websocketConnections.push(ws);
+  refreshBalance([ws]);
 });
 
 async function createWalletIfNotExists(rpcClient, walletName) {
@@ -104,7 +122,7 @@ async function createWalletIfNotExists(rpcClient, walletName) {
     if (!e.message.includes("Database already exists")) {
       throw e;
     }
-    console.log(`Wallet '${walletName}' already exists.`);
+    logger.debug(`Wallet '${walletName}' already exists.`);
     newWallet = false;
   }
 
@@ -117,7 +135,7 @@ async function createWalletIfNotExists(rpcClient, walletName) {
     if (!e.message.includes("is already loaded.")) {
       throw e;
     }
-    console.log(`Wallet '${walletName}' already loaded.`);
+    logger.debug(`Wallet '${walletName}' already loaded.`);
   }
 
   return newWallet;
@@ -131,7 +149,7 @@ const initializeWallet = async () => {
 
   if (NETWORK == "regtest") {
     // Fund the default wallet with block subsidies
-    console.log("Generating blocks and funding default wallet...");
+    logger.debug("Generating blocks and funding default wallet...");
     let address = await defaultWalletClient.request("getnewaddress");
     await defaultWalletClient.request("generatetoaddress", {
       nblocks: 101,
@@ -143,25 +161,38 @@ const initializeWallet = async () => {
   await createWalletIfNotExists(defaultWalletClient, WALLET_NAME);
   const donationWalletClient = createRpcClient(`/wallet/${WALLET_NAME}`);
   donationAddress = await donationWalletClient.request("getnewaddress");
-  console.log(donationAddress);
+  logger.debug(donationAddress);
+
+  if (NETWORK == "regtest") {
+    logger.debug("Scheduling test payment...");
+
+    setTimeout(async () => {
+      await defaultWalletClient.request("sendtoaddress", {
+        address: donationAddress,
+        amount: "0.00001000",
+      });
+    }, 15000);
+  }
+
   initializationFinished = true;
 };
 
 function startServer() {
   if (initializationFinished) {
-    console.log("Starting server");
+    logger.debug("Starting server");
     return server.listen(PORT, () => {
-      console.log(`Server started on port ${PORT}`);
+      logger.debug(`Server started on port ${PORT}`);
     });
   }
 
-  console.log();
-  console.log("Wallet initialization incomplete.");
-  console.log("Waiting another second.");
-  console.log();
+  logger.debug();
+  logger.debug("Wallet initialization incomplete.");
+  logger.debug("Waiting another second.");
+  logger.debug();
 
   setTimeout(startServer, 1_000);
 }
 
+run(websocketConnections);
 initializeWallet();
 startServer();

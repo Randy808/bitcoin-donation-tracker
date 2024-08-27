@@ -1,0 +1,64 @@
+<html class="focus-outline-visible">
+  <head>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="vsc-initialized body-style">
+    <div class="container">
+      <h1 class="main-title"><span id="confirmed">-</span> BTC</h1>
+      <div class="info-container">
+        <div class="address-section">
+          <p class="section-title">Address</p>
+          <p id="address" class="section-content">-</p>
+          <div id="qrcode"></div>
+        </div>
+        <div class="funds-section">
+          <p class="section-title">Unconfirmed Funds</p>
+          <p class="section-content"><span id="unconfirmed">-</span> BTC</p>
+        </div>
+      </div>
+    </div>
+    <script src="qrcode.min.js"></script>
+    <script>
+      async function connect() {
+        let showMessage = console.log;
+        let ws = new WebSocket(`ws://${location.host}`);
+        ws.onerror = function () {
+          showMessage("WebSocket error");
+        };
+        ws.onopen = function () {
+          showMessage("WebSocket connection established");
+        };
+        ws.onclose = function () {
+          delete ws;
+          setTimeout(connect, 1000);
+        };
+        ws.onmessage = function (event) {
+          console.log(event);
+          let balance = JSON.parse(event.data);
+          document.getElementById("confirmed").innerHTML = balance.confirmed;
+          document.getElementById("unconfirmed").innerHTML =
+            balance.unconfirmed;
+        };
+      }
+
+      connect();
+
+      async function setAddress() {
+        const addressResponse = await fetch("/address");
+        const address = await addressResponse.text();
+        document.getElementById("address").innerText = address;
+
+        new QRCode(document.getElementById("qrcode"), {
+          text: `bitcoin:${address}`,
+          width: 150,
+          height: 150,
+          colorDark: "#000000",
+          colorLight: "transparent",
+          correctLevel: QRCode.CorrectLevel.H,
+        });
+      }
+
+      setAddress();
+    </script>
+  </body>
+</html>
